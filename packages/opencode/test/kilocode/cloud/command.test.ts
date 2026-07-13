@@ -4,6 +4,7 @@ import { Auth } from "@/auth"
 import { Config } from "@/config/config"
 import type { AgentSendRequest, AgentStartRequest, MessageResult } from "@/kilocode/cloud/contracts"
 import { CloudCommands } from "@/kilocode/cloud/commands"
+import { CloudError } from "@/kilocode/cloud/errors"
 import { Git } from "@/git"
 import { Effect, Layer } from "effect"
 import { TestInstance } from "../../fixture/fixture"
@@ -198,7 +199,7 @@ it.instance(
           expect(ticketCalls).toEqual([])
           expect(streamCalls).toEqual(["/stream?cloudAgentSessionId=agent_123&ticket=inlined"])
           expect(output).toEqual([
-            JSON.stringify(response) + "\n",
+            JSON.stringify({ ...response, streamUrl: undefined }) + "\n",
             '{"event":"one"}\n',
             '{"streamEventType":"complete","data":{"exitCode":0}}\n',
           ])
@@ -283,12 +284,87 @@ it.instance(
           )
 
           expect(ticketCalls).toEqual([{ cloudAgentSessionId: SESSION, organizationId: ORG }])
-          expect(streamCalls).toEqual([
-            `/stream?cloudAgentSessionId=${SESSION}&ticket=derived-tok`,
-          ])
+          expect(streamCalls).toEqual([`/stream?cloudAgentSessionId=${SESSION}&ticket=derived-tok`])
+          expect(output).toEqual([JSON.stringify(response) + "\n", '{"event":"derived"}\n'])
+        }),
+      (server) => Effect.promise(() => server.stop(true)),
+    ),
+  {
+    git: true,
+    config: {
+      default_agent: "plan",
+      agent: { plan: { model: "kilo/anthropic/command-model" } },
+    },
+  },
+)
+
+it.instance(
+  "keeps admission successful when stream ticket acquisition fails",
+  () =>
+    Effect.acquireUseRelease(
+      Effect.sync(() =>
+        Bun.serve({
+          hostname: "127.0.0.1",
+          port: 0,
+          fetch(request) {
+            const url = new URL(request.url)
+            if (url.pathname.endsWith("/models")) {
+              return Response.json({ data: [{ id: "anthropic/command-model", supported_parameters: ["tools"] }] })
+            }
+            if (url.pathname.endsWith("/defaults")) {
+              return Response.json({ defaultModel: "anthropic/command-model" })
+            }
+            return new Response(null, { status: 404 })
+          },
+        }),
+      ),
+      (server) =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const output: string[] = []
+          const response = {
+            cloudAgentSessionId: SESSION,
+            kiloSessionId: "ses_stream_test",
+            messageId: MESSAGE,
+            delivery: "queued" as const,
+          }
+
+          const result = yield* CloudCommands.start(
+            {
+              cwd: test.directory,
+              prompt: "Inspect the repository",
+              repo: "Kilo-Org/kilocode",
+              stream: true,
+            },
+            {
+              env: { KILO_API_URL: server.url.origin },
+              make: () => ({
+                async start() {
+                  return response
+                },
+                async send() {
+                  throw new Error("unused")
+                },
+                async getMessageResult() {
+                  throw new Error("unused")
+                },
+              }),
+              createStreamTicketClient: () => ({
+                async fetchTicket() {
+                  throw new CloudError("Unable to obtain stream ticket")
+                },
+              }),
+              streamAgentEvents: async () => {
+                throw new Error("unused")
+              },
+              write: (text) => output.push(text),
+            },
+          )
+
+          expect(result).toEqual(response)
           expect(output).toEqual([
             JSON.stringify(response) + "\n",
-            '{"event":"derived"}\n',
+            JSON.stringify({ streamEventType: "error", data: { message: "Unable to obtain stream ticket" } }) + "\n",
           ])
         }),
       (server) => Effect.promise(() => server.stop(true)),
@@ -362,7 +438,10 @@ it.instance(
           )
 
           expect(result).toEqual(response)
-          expect(output).toEqual([JSON.stringify(response) + "\n"])
+          expect(output).toEqual([
+            JSON.stringify({ ...response, streamUrl: undefined }) + "\n",
+            JSON.stringify({ streamEventType: "error", data: { message: "Cloud Agent stream failed" } }) + "\n",
+          ])
         }),
       (server) => Effect.promise(() => server.stop(true)),
     ),
@@ -431,7 +510,7 @@ it.instance("sends follow-ups, prints status without assistant content, and appl
 
     expect(sends).toEqual([{ cloudAgentSessionId: SESSION, message: { prompt: "Continue" } }])
     expect(output).toEqual([
-      JSON.stringify(sent) + "\n",
+      JSON.stringify({ ...sent, streamUrl: undefined }) + "\n",
       JSON.stringify({
         cloudAgentSessionId: SESSION,
         messageId: MESSAGE,

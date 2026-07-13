@@ -28,6 +28,7 @@ describe("createStreamTicketClient", () => {
     expect(url.toString()).toBe("https://app.example/api/cloud-agent-next/sessions/stream-ticket")
     expect(init).toMatchObject({
       method: "POST",
+      redirect: "error",
       headers: expect.objectContaining({
         authorization: "Bearer key",
         "content-type": "application/json",
@@ -68,6 +69,17 @@ describe("createStreamTicketClient", () => {
 
     expect(result).toEqual({ ticket: "tok", expiresAt: 1234567890 })
     expect(fetch.calls).toHaveLength(3)
+  })
+
+  test("retries when a 404 response has an invalid body", async () => {
+    const fetch = mockFetch()
+      .resolved(new Response("not json", { status: 404 }))
+      .resolved(jsonResponse({ ticket: "tok", expiresAt: 1234567890 }))
+
+    const result = await client({ fetch }).fetchTicket({ cloudAgentSessionId: "agent_123" })
+
+    expect(result).toEqual({ ticket: "tok", expiresAt: 1234567890 })
+    expect(fetch.calls).toHaveLength(2)
   })
 
   test("gives up after repeated 403 responses", async () => {

@@ -58,11 +58,7 @@ export function streamAgentEvents(options: StreamAgentEventsOptions): Promise<vo
       clear()
       if (!settled) {
         settled = true
-        try {
-          socket.close()
-        } catch {
-          // Preserve the original stream error if close itself fails.
-        }
+        socket.close()
         reject(new CloudError(message))
       }
     }
@@ -75,7 +71,7 @@ export function streamAgentEvents(options: StreamAgentEventsOptions): Promise<vo
     function initiateClose() {
       if (settled) return
       try {
-        socket.close()
+        socket.close(1000)
       } catch {
         finish()
         return
@@ -98,7 +94,10 @@ export function streamAgentEvents(options: StreamAgentEventsOptions): Promise<vo
       fail("WebSocket stream connection failed")
     }
 
-    socket.onclose = () => finish()
+    socket.onclose = (event) => {
+      if (event.code === 1000) return finish()
+      fail(`WebSocket stream closed unexpectedly (${event.code})`)
+    }
   })
 }
 

@@ -117,6 +117,12 @@ export namespace CloudCommands {
     process.stdout.write(line)
   }
 
+  function notice(error: unknown, deps: Deps) {
+    return print({ streamEventType: "error", data: { message: diagnostic(error) } }, deps).pipe(
+      Effect.catch(() => Effect.void),
+    )
+  }
+
   function attempt<A>(run: () => Promise<A>) {
     return Effect.tryPromise({
       try: run,
@@ -186,19 +192,21 @@ export namespace CloudCommands {
           },
         } satisfies AgentStartRequest
         const result = yield* attempt(() => agent.start(request))
-        yield* print(result, deps, "start")
+        yield* print({ ...result, streamUrl: undefined }, deps, "start")
         if (input.stream) {
-          const streamUrl = yield* resolveStreamUrl(result, defaults, env, deps)
-          yield* Effect.tryPromise({
-            try: () =>
-              (deps.streamAgentEvents ?? streamAgentEvents)({
-                streamUrl,
-                origin: resolveCloudAgentOrigin(env),
-                writeLine: (line) => writeLine(line, deps),
-                WebSocket: globalThis.WebSocket,
-              }),
-            catch: (error) => (error instanceof CloudError ? error : new CloudError("Cloud Agent stream failed")),
-          }).pipe(Effect.catch(() => Effect.void))
+          yield* Effect.gen(function* () {
+            const streamUrl = yield* resolveStreamUrl(result, defaults, env, deps)
+            yield* Effect.tryPromise({
+              try: () =>
+                (deps.streamAgentEvents ?? streamAgentEvents)({
+                  streamUrl,
+                  origin: resolveCloudAgentOrigin(env),
+                  writeLine: (line) => writeLine(line, deps),
+                  WebSocket: globalThis.WebSocket,
+                }),
+              catch: (error) => (error instanceof CloudError ? error : new CloudError("Cloud Agent stream failed")),
+            })
+          }).pipe(Effect.catch((error) => notice(error, deps)))
         }
         return result
       }),
@@ -221,7 +229,7 @@ export namespace CloudCommands {
             message: { prompt: input.prompt },
           }),
         )
-        yield* print(result, deps, "send")
+        yield* print({ ...result, streamUrl: undefined }, deps, "send")
         return result
       }),
     )

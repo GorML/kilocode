@@ -3,14 +3,14 @@ import { streamAgentEvents } from "@/kilocode/cloud/websocket-stream"
 
 function mockWebSocket(
   events: ReadonlyArray<
-    { type: "message"; data: string | ArrayBuffer } | { type: "error" } | { type: "close" }
+    { type: "message"; data: string | ArrayBuffer } | { type: "error" } | { type: "close"; code?: number }
   >,
-  options?: { onClose?: () => void; triggerOnCloseOnClose?: boolean },
+  options?: { onClose?: (code?: number) => void; triggerOnCloseOnClose?: boolean },
 ) {
   return class MockWebSocket {
     onmessage: ((event: MessageEvent) => void) | null = null
     onerror: (() => void) | null = null
-    onclose: (() => void) | null = null
+    onclose: ((event: CloseEvent) => void) | null = null
 
     constructor(_url: string) {
       queueMicrotask(() => {
@@ -21,18 +21,18 @@ function mockWebSocket(
             this.onerror?.()
             return
           } else if (event.type === "close") {
-            this.onclose?.()
+            this.onclose?.({ code: event.code ?? 1000 } as CloseEvent)
             return
           }
         }
       })
     }
 
-    close() {
-      options?.onClose?.()
+    close(code?: number) {
+      options?.onClose?.(code)
       if (options?.triggerOnCloseOnClose) {
         queueMicrotask(() => {
-          this.onclose?.()
+          this.onclose?.({ code: code ?? 1000 } as CloseEvent)
         })
       }
     }
@@ -126,6 +126,19 @@ describe("streamAgentEvents", () => {
     ).rejects.toThrow("WebSocket stream connection failed")
   })
 
+  test("rejects when the WebSocket closes abnormally", async () => {
+    const Socket = mockWebSocket([{ type: "close", code: 1011 }])
+
+    await expect(
+      streamAgentEvents({
+        streamUrl: "/stream?cloudAgentSessionId=agent_123&ticket=tok",
+        origin: "https://agent.example",
+        writeLine: () => {},
+        WebSocket: Socket as unknown as typeof WebSocket,
+      }),
+    ).rejects.toThrow("WebSocket stream closed unexpectedly (1011)")
+  })
+
   test("rejects when the WebSocket stream stalls", async () => {
     const Socket = mockWebSocket([])
 
@@ -142,13 +155,13 @@ describe("streamAgentEvents", () => {
 
   test("resolves 3 seconds after receiving a complete event", async () => {
     const lines: string[] = []
-    let closed = 0
+    const codes: Array<number | undefined> = []
     const Socket = mockWebSocket(
       [
         { type: "message", data: '{"event":"running"}' },
         { type: "message", data: '{"streamEventType":"complete","data":{"exitCode":0}}' },
       ],
-      { onClose: () => closed++, triggerOnCloseOnClose: true },
+      { onClose: (code) => codes.push(code), triggerOnCloseOnClose: true },
     )
 
     const start = Date.now()
@@ -160,7 +173,7 @@ describe("streamAgentEvents", () => {
     })
 
     expect(Date.now() - start).toBeGreaterThanOrEqual(3000)
-    expect(closed).toBe(1)
+    expect(codes).toEqual([1000])
     expect(lines).toEqual(['{"event":"running"}', '{"streamEventType":"complete","data":{"exitCode":0}}'])
   }, 10_000)
 })

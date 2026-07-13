@@ -21,10 +21,7 @@ export interface StreamTicket {
 }
 
 export interface StreamTicketClient {
-  fetchTicket(input: {
-    readonly cloudAgentSessionId: string
-    readonly organizationId?: string
-  }): Promise<StreamTicket>
+  fetchTicket(input: { readonly cloudAgentSessionId: string; readonly organizationId?: string }): Promise<StreamTicket>
 }
 
 export interface CreateStreamTicketClientOptions {
@@ -52,6 +49,7 @@ export function createStreamTicketClient(options: CreateStreamTicketClientOption
         try {
           response = await fetcher(url, {
             method: "POST",
+            redirect: "error",
             headers: {
               "content-type": "application/json",
               authorization: `Bearer ${options.apiKey}`,
@@ -63,12 +61,10 @@ export function createStreamTicketClient(options: CreateStreamTicketClientOption
           throw new CloudError("Unable to reach Web App stream ticket endpoint")
         }
 
-        let payload: unknown
-        try {
-          payload = await readBoundedJson(response, MAX_STREAM_TICKET_RESPONSE_BYTES)
-        } catch {
+        const payload = await readBoundedJson(response, MAX_STREAM_TICKET_RESPONSE_BYTES).catch(() => {
+          if (response.status === 403 || response.status === 404) return undefined
           throw new CloudError("Web App returned an invalid stream ticket response")
-        }
+        })
 
         if (response.ok) {
           const parsed = StreamTicketResponseSchema.safeParse(payload)
@@ -87,10 +83,7 @@ export function createStreamTicketClient(options: CreateStreamTicketClientOption
 
 function messageForStatus(status: number, payload: unknown): string {
   const server =
-    typeof payload === "object" &&
-    payload !== null &&
-    "error" in payload &&
-    typeof payload.error === "string"
+    typeof payload === "object" && payload !== null && "error" in payload && typeof payload.error === "string"
       ? payload.error
       : undefined
 

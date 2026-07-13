@@ -10,6 +10,7 @@ export class ResponseJsonError extends Error {
 export async function readBoundedJson(response: Response, max = MAX_CLOUD_AGENT_RESPONSE_BYTES): Promise<unknown> {
   const length = response.headers.get("content-length")
   if (length !== null && /^\d+$/.test(length) && Number(length) > max) {
+    await response.body?.cancel().catch(() => undefined)
     throw new ResponseJsonError("JSON response exceeds the configured limit")
   }
   if (response.body === null) throw new ResponseJsonError("JSON response body is missing")
