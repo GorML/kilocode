@@ -79,72 +79,27 @@ export const GetMessageResultInputSchema = z
   .object({ cloudAgentSessionId: CloudAgentSessionIdSchema, messageId: MessageIdSchema })
   .strict()
 
-export const AgentStartResponseSchema = z
-  .object({
-    cloudAgentSessionId: CloudAgentSessionIdSchema,
-    kiloSessionId: z.string(),
-    messageId: MessageIdSchema,
-    delivery: z.enum(["sent", "queued"]),
-    streamUrl: z.string().min(1).optional(),
-    wrapperRunId: z.string().optional(),
-  })
-  .strict()
+export const AgentStartResponseSchema = z.object({
+  cloudAgentSessionId: CloudAgentSessionIdSchema,
+  kiloSessionId: z.string(),
+  messageId: MessageIdSchema,
+  delivery: z.string().min(1).max(50),
+  streamUrl: z.string().min(1).optional(),
+  wrapperRunId: z.string().optional(),
+})
 
-export const AgentSendResponseSchema = z
-  .object({
-    cloudAgentSessionId: CloudAgentSessionIdSchema,
-    status: z.literal("started"),
-    streamUrl: z.string().min(1),
-    messageId: MessageIdSchema,
-    delivery: z.enum(["sent", "queued"]),
-    wrapperRunId: z.string().optional(),
-  })
-  .strict()
+export const AgentSendResponseSchema = z.object({
+  cloudAgentSessionId: CloudAgentSessionIdSchema,
+  status: z.literal("started"),
+  streamUrl: z.string().min(1),
+  messageId: MessageIdSchema,
+  delivery: z.string().min(1).max(50),
+  wrapperRunId: z.string().optional(),
+})
 
-const FailureStageSchema = z.enum([
-  "pre_dispatch",
-  "post_dispatch_no_activity",
-  "agent_activity",
-  "interruption",
-  "unknown",
-])
-const FailureCodeSchema = z.enum([
-  "sandbox_connect_failed",
-  "workspace_setup_failed",
-  "kilo_server_failed",
-  "wrapper_start_failed",
-  "invalid_delivery_request",
-  "session_metadata_missing",
-  "model_missing",
-  "delivery_failure_unknown",
-  "wrapper_disconnected",
-  "wrapper_no_output",
-  "wrapper_ping_timeout",
-  "wrapper_error_before_activity",
-  "assistant_error",
-  "wrapper_error_after_activity",
-  "missing_assistant_reply",
-  "payment_required",
-  "user_interrupt",
-  "container_shutdown",
-  "system_interrupt",
-  "unclassified",
-])
-const FailureSubtypeSchema = z.enum([
-  "git_clone_timeout",
-  "git_checkout_timeout",
-  "git_authentication_failed",
-  "git_network_failed",
-  "git_pack_corrupt",
-  "git_checkout_conflict",
-  "git_branch_missing",
-  "sandbox_storage_full",
-  "kilo_import_timeout",
-  "kilo_import_failed",
-  "setup_command_timeout",
-  "setup_command_failed",
-  "workspace_setup_unknown",
-])
+const FailureStageSchema = z.string().min(1).max(100)
+const FailureCodeSchema = z.string().min(1).max(100)
+const FailureSubtypeSchema = z.string().min(1).max(100)
 
 export const SafeFailureSchema = z
   .object({
@@ -155,7 +110,6 @@ export const SafeFailureSchema = z
     message: z.string().min(1).max(4_096).optional(),
     retryable: z.boolean(),
   })
-  .strict()
   .refine((failure) => failure.subtype === undefined || failure.code === "workspace_setup_failed", {
     message: "Workspace failure subtype requires workspace_setup_failed failure code",
     path: ["subtype"],
@@ -170,21 +124,11 @@ export const GetMessageResultOutputSchema = z
     queuedAt: z.number().optional(),
     acceptedAt: z.number().optional(),
     terminalAt: z.number().optional(),
-    completionSource: z
-      .enum([
-        "assistant_message_event",
-        "manual_compact_summarize",
-        "idle_reconciliation",
-        "wrapper_failure",
-        "interrupt",
-        "delivery_failure",
-      ])
-      .optional(),
+    completionSource: z.string().min(1).max(100).optional(),
     failure: SafeFailureSchema.optional(),
-    gateResult: z.enum(["pass", "fail"]).optional(),
-    assistant: z.object({ messageId: z.string(), text: z.string().optional() }).strict().optional(),
+    gateResult: z.string().min(1).max(50).optional(),
+    assistant: z.object({ messageId: z.string(), text: z.string().optional() }).optional(),
   })
-  .strict()
   .superRefine((result, ctx) => {
     const terminal = result.status === "completed" || result.status === "failed" || result.status === "interrupted"
     if (result.status === "queued" && result.acceptedAt !== undefined) {

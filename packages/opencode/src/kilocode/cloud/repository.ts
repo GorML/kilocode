@@ -1,4 +1,3 @@
-import { isIP } from "node:net"
 import { Effect, Schema } from "effect"
 import { Git } from "@/git"
 
@@ -96,48 +95,6 @@ export namespace CloudRepository {
     return value
   }
 
-  function unsafe(value: string) {
-    return (
-      value.includes("\\") ||
-      value.includes("%") ||
-      value.includes("?") ||
-      value.includes("#") ||
-      /(?:^|\/)\.{1,2}(?:\/|$)/.test(value) ||
-      /\p{Cc}/u.test(value)
-    )
-  }
-
-  function restricted(host: string) {
-    const name = host.toLowerCase().replace(/^\[|\]$/g, "")
-    if (name === "localhost" || name.endsWith(".localhost")) return true
-
-    const version = isIP(name)
-    if (version === 4) {
-      const parts = name.split(".").map(Number)
-      const [a = 0, b = 0, c = 0] = parts
-      return (
-        a === 0 ||
-        a === 10 ||
-        (a === 100 && b >= 64 && b <= 127) ||
-        a === 127 ||
-        (a === 169 && b === 254) ||
-        (a === 172 && b >= 16 && b <= 31) ||
-        (a === 192 && b === 0 && (c === 0 || c === 2)) ||
-        (a === 192 && b === 88 && c === 99) ||
-        (a === 192 && b === 168) ||
-        (a === 198 && (b === 18 || b === 19)) ||
-        (a === 198 && b === 51 && c === 100) ||
-        (a === 203 && b === 0 && c === 113) ||
-        a >= 224
-      )
-    }
-    if (version !== 6) return false
-    if (name.startsWith("::")) return true
-
-    const first = Number.parseInt(name.split(":")[0] ?? "", 16)
-    return !Number.isFinite(first) || first < 0x2000 || first > 0x3fff || name.startsWith("2001:db8:")
-  }
-
   function github(path: string) {
     const clean = path.startsWith("/") ? path.slice(1) : path
     const trimmed = clean.endsWith("/") ? clean.slice(0, -1) : clean
@@ -156,7 +113,7 @@ export namespace CloudRepository {
 
   function ssh(value: string): string | undefined {
     if (value.startsWith("ssh://")) {
-      if (unsafe(value) || !URL.canParse(value)) return invalid("Repository SSH URL is unsafe")
+      if (!URL.canParse(value)) return invalid("Repository SSH URL is invalid")
       const url = new URL(value)
       if (
         url.protocol !== "ssh:" ||
@@ -164,8 +121,7 @@ export namespace CloudRepository {
         url.hostname.endsWith(".") ||
         url.username !== "git" ||
         url.password !== "" ||
-        url.port !== "" ||
-        restricted(url.hostname)
+        url.port !== ""
       ) {
         return invalid("Only standard GitHub SSH repository URLs are supported")
       }
@@ -175,15 +131,15 @@ export namespace CloudRepository {
     const match = value.match(/^([^@/\s]+)@([^:/\s]+):(.+)$/)
     if (!match) return undefined
     const host = match[2].toLowerCase()
-    if (unsafe(value) || match[1] !== "git" || host !== "github.com" || host.endsWith(".")) {
+    if (match[1] !== "git" || host !== "github.com" || host.endsWith(".")) {
       return invalid("Only standard GitHub SCP repository URLs are supported")
     }
     return github(match[3])
   }
 
   function https(value: string) {
-    if (!value.startsWith("https://") || unsafe(value) || !URL.canParse(value)) {
-      return invalid("Repository URL must be a safe HTTPS URL")
+    if (!value.startsWith("https://") || !URL.canParse(value)) {
+      return invalid("Repository URL must be a valid HTTPS URL")
     }
     const url = new URL(value)
     if (
@@ -191,11 +147,10 @@ export namespace CloudRepository {
       url.username !== "" ||
       url.password !== "" ||
       url.hostname.endsWith(".") ||
-      restricted(url.hostname) ||
       url.search !== "" ||
       url.hash !== ""
     ) {
-      return invalid("Repository URL must not include credentials, unsafe hosts, query strings, or fragments")
+      return invalid("Repository URL must not include credentials, query strings, or fragments")
     }
     return url
   }

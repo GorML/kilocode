@@ -8,12 +8,10 @@ const STREAM_TICKET_TIMEOUT_MS = 30_000
 const TICKET_RETRY_ATTEMPTS = 10
 const TICKET_RETRY_DELAY_MS = 1000
 
-const StreamTicketResponseSchema = z
-  .object({
-    ticket: z.string().min(1),
-    expiresAt: z.number(),
-  })
-  .strict()
+const StreamTicketResponseSchema = z.object({
+  ticket: z.string().min(1),
+  expiresAt: z.number(),
+})
 
 export interface StreamTicket {
   readonly ticket: string

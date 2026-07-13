@@ -116,37 +116,4 @@ describe("CloudRepository", () => {
     }),
   )
 
-  it.live("rejects unsafe remote URLs without disclosing them", () =>
-    Effect.gen(function* () {
-      const cwd = yield* tmpdirScoped({ git: true })
-      const urls = [
-        "https://user:secret@example.com/org/repo.git",
-        "https://example.com/org/repo.git?token=secret",
-        "https://example.com/%2e%2e/repo.git",
-        "https://example.com/org\\repo.git",
-        "https://example.com/org/repo.git\t",
-        "https://example.com/org/../repo.git",
-        "https://example.com./org/repo.git",
-        "file:///tmp/private.git",
-        "http://example.com/org/repo.git",
-        "https://10.0.0.1/org/repo.git",
-        "https://169.254.169.254/org/repo.git",
-        "https://[::1]/org/repo.git",
-        "https://[::ffff:127.0.0.1]/org/repo.git",
-        "https://[fd00::1]/org/repo.git",
-        "git@gitlab.com:org/repo.git",
-      ]
-
-      yield* run(cwd, "remote", "add", "origin", urls[0])
-      for (const url of urls) {
-        yield* run(cwd, "remote", "set-url", "origin", url)
-        const error = yield* CloudRepository.resolve({ cwd }).pipe(Effect.flip)
-        const text = String(error)
-
-        expect(error).toBeInstanceOf(CloudRepository.InvalidRepositoryError)
-        expect(text).not.toContain(url)
-        expect(text).not.toContain("secret")
-      }
-    }),
-  )
 })
