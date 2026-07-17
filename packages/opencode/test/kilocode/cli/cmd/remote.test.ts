@@ -15,10 +15,16 @@
 // `if (!process.env["KILO_REMOTE_ATTACH_SESSION"])` block.
 
 import { describe, expect, test } from "bun:test"
+import { fileURLToPath } from "node:url"
 
 describe("RemoteCommand env-gate (K1 W1)", () => {
   test("KiloSessions.setInstanceAdvertisement call site is gated on KILO_REMOTE_ATTACH_SESSION", async () => {
-    const src = await Bun.file(new URL("../../../../src/cli/cmd/remote.ts", import.meta.url).pathname).text()
+    // kilocode_change - `URL.pathname` for a `file://` URL on Windows keeps
+    // a leading slash before the drive letter (e.g. `/C:/Users/...`), which
+    // `Bun.file()` cannot resolve to the real path. `fileURLToPath` handles
+    // the platform-specific conversion correctly on every OS.
+    const filePath = fileURLToPath(new URL("../../../../src/cli/cmd/remote.ts", import.meta.url))
+    const src = await Bun.file(filePath).text()
 
     // The env var must be referenced.
     expect(src).toContain("KILO_REMOTE_ATTACH_SESSION")
