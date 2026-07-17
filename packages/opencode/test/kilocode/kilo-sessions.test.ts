@@ -327,11 +327,19 @@ describe("KiloSessions.setInstanceAdvertisement (K1 W1)", () => {
     clearInFlightCache("kilo-sessions:token")
     clearInFlightCache("kilo-sessions:token-valid:tok")
 
+    // kilocode_change - only mock the specific endpoint authValid() calls
+    // (${KILO_API_BASE}/api/user). A blanket mock that returned 200 for
+    // every URL previously fed a bogus response to whatever OTHER fetch
+    // call provide()'s InstanceStore.Service.load(...) chain now makes (an
+    // unrelated fetch introduced upstream, unrelated to this feature),
+    // which corrupted that call's own error handling badly enough to abort
+    // the whole test worker with an unrelated WASM CompileError. Reject
+    // anything else so callers take their own real offline/error path.
     globalThis.fetch = mock(async (input) => {
       if (String(input).endsWith("/api/user")) {
         return new Response(null, { status: 200 })
       }
-      return new Response(null, { status: 200 })
+      throw new Error(`unexpected fetch in test: ${String(input)}`)
     }) as unknown as typeof fetch
   })
 
@@ -510,11 +518,19 @@ describe("KiloSessions attach-on-boot (K2 W2)", () => {
     clearInFlightCache("kilo-sessions:token")
     clearInFlightCache("kilo-sessions:token-valid:tok")
 
+    // kilocode_change - only mock the specific endpoint authValid() calls
+    // (${KILO_API_BASE}/api/user). A blanket mock that returned 200 for
+    // every URL previously fed a bogus response to whatever OTHER fetch
+    // call provide()'s InstanceStore.Service.load(...) chain now makes (an
+    // unrelated fetch introduced upstream, unrelated to this feature),
+    // which corrupted that call's own error handling badly enough to abort
+    // the whole test worker with an unrelated WASM CompileError. Reject
+    // anything else so callers take their own real offline/error path.
     globalThis.fetch = mock(async (input) => {
       if (String(input).endsWith("/api/user")) {
         return new Response(null, { status: 200 })
       }
-      return new Response(null, { status: 200 })
+      throw new Error(`unexpected fetch in test: ${String(input)}`)
     }) as unknown as typeof fetch
   })
 
