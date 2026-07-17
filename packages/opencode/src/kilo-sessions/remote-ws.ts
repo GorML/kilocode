@@ -7,7 +7,12 @@ export namespace RemoteWS {
   export type Options = {
     url: string
     getToken: () => Promise<string | undefined>
-    getSessions: () => Promise<{ sessions: SessionInfo[] }>
+    // kilocode_change - K1 W1: getSessions now returns the full Heartbeat
+    // payload (including optional `instance` advertisement) so type-level
+    // consumers downstream can see the field. Callers in kilo-sessions
+    // already build a full Heartbeat object; widening the type is a no-op
+    // at runtime.
+    getSessions: () => Promise<RemoteProtocol.Heartbeat | { sessions: SessionInfo[] }>
     log: {
       info: (...args: any[]) => void
       error: (...args: any[]) => void
@@ -59,6 +64,10 @@ export namespace RemoteWS {
             queued = false
             const sessions = await options.getSessions()
             if (closed) return
+            // kilocode_change - K1 W1: spread `sessions` so optional `instance`
+            // advertisement flows through to the wire unchanged. We always
+            // set `type: "heartbeat"` explicitly because legacy callers
+            // (older test mocks) still return a bare `{ sessions }` shape.
             send({ type: "heartbeat", protocolVersion: InstallationVersion, ...sessions })
           }
         }),
@@ -137,6 +146,13 @@ export namespace RemoteWS {
         activity = Date.now()
         startHeartbeat()
         startWatchdog()
+        // kilocode_change - K1 W1: fire one heartbeat immediately on connect so
+        // a freshly-attached instance appears on the relay (and on the cloud
+        // instance picker, if advertised) without waiting up to 10s for the
+        // next timer tick. Errors are logged by the heartbeat() promise itself.
+        void heartbeat().catch((err) => {
+          options.log.error("remote-ws initial heartbeat failed", { error: String(err) })
+        })
       }
 
       socket.onmessage = (event) => {

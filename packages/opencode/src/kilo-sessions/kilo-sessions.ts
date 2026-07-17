@@ -25,6 +25,7 @@ import { Vcs } from "@/project/vcs"
 import simpleGit from "simple-git"
 import { RemoteWS } from "@/kilo-sessions/remote-ws"
 import { RemoteSender } from "@/kilo-sessions/remote-sender"
+import { RemoteProtocol } from "@/kilo-sessions/remote-protocol"
 import { AttachedState } from "@/kilo-sessions/attached-state"
 import { SessionStatus } from "@/session/status"
 import { Telemetry } from "@kilocode/kilo-telemetry"
@@ -213,6 +214,14 @@ export namespace KiloSessions {
   let remote: { conn: RemoteWS.Connection; sender: RemoteSender.Sender } | undefined
   let enabling: Promise<void> | undefined
   let remoteSeq = 0
+  // kilocode_change start - K1 W1: module-level instance advertisement flag.
+  // `enableRemote` can be triggered either by the explicit `kilo remote` command
+  // or by bootstrap auto-enable (`KILO_REMOTE=1` / `remote_control` config); it
+  // is idempotent/coalescing, so passing an {instance} arg on one specific call
+  // would race with whichever call happens first. A module-level flag flipped
+  // by either caller is the only race-free way to advertise the instance.
+  let instanceAdvertisement: RemoteProtocol.InstanceAdvertisement | undefined
+  // kilocode_change end
   // kilocode_change start - separate presence-owned attached session ids from
   // newly-created (pending) session announcements so a concurrent presence
   // update cannot drop a pending id and a heartbeat failure cannot delete a
@@ -432,7 +441,11 @@ export namespace KiloSessions {
       // Capture directory so the heartbeat timer can re-enter the Instance context
       // (setInterval runs outside AsyncLocalStorage scope)
       const directory = Instance.directory
-      const getSessions = async () => {
+      // kilocode_change - K1 W1: capture module-level advertisement so each
+      // heartbeat's `instance` field stays consistent with the flag at the
+      // moment of sending. The flag may be set after this closure is created
+      // (race-proof) — `getSessions` reads the current value each tick.
+      const getSessions = async (): Promise<RemoteProtocol.Heartbeat> => {
         const [gitUrl, gitBranch] = await Promise.all([
           getGitUrl().catch(() => undefined),
           branch().catch(() => undefined),
@@ -457,6 +470,10 @@ export namespace KiloSessions {
                     parentSessionId: session.parentID,
                     gitUrl,
                     gitBranch,
+                    // kilocode_change - K1 W1: per-session platform, mirrors
+                    // meta()'s resolution order so the live value always agrees
+                    // with the session's stored created_on_platform.
+                    platform: KiloSession.resolvePlatform(id) || process.env["KILO_PLATFORM"] || "cli",
                   })),
                   Effect.orElseSucceed(() => undefined),
                 ),
@@ -465,7 +482,8 @@ export namespace KiloSessions {
           ),
         )
         const sessions = results.filter((r): r is NonNullable<typeof r> => !!r)
-        return { sessions }
+        const instance = instanceAdvertisement
+        return { type: "heartbeat", sessions, ...(instance ? { instance } : {}) }
       }
 
       const conn = RemoteWS.connect({
@@ -546,6 +564,34 @@ export namespace KiloSessions {
     // announcement is not dropped by a presence clear+rebuild.
     attachedState.setPresence(ids)
   }
+
+  // kilocode_change start - K1 W1: instance advertisement setter.
+  // Idempotent. If a remote connection is already established when the flag is
+  // flipped (typical for the race between bootstrap auto-enable and the
+  // explicit `kilo remote` command — `enableRemote` itself is coalescing), we
+  // fire one out-of-band heartbeat so the cloud side learns about the
+  // instance without waiting for the next 10s timer tick.
+  export function setInstanceAdvertisement(advertisement: RemoteProtocol.InstanceAdvertisement) {
+    instanceAdvertisement = advertisement
+    if (remote) {
+      void remote.conn.heartbeat().catch((err) =>
+        log.warn("instance advertisement heartbeat failed", {
+          error: String(err),
+        }),
+      )
+    }
+  }
+
+  // Test-only: the advertisement flag is intentionally one-way in production
+  // (once a process runs `kilo remote`, it keeps advertising for its whole
+  // lifetime, including across a transient disableRemote/enableRemote
+  // reconnect cycle — disableRemote() deliberately does not clear it). Tests
+  // that assert the "unset" default must reset the module-level flag
+  // themselves between cases.
+  export function resetInstanceAdvertisementForTests() {
+    instanceAdvertisement = undefined
+  }
+  // kilocode_change end
 
   // kilocode_change start - duplicate-safe single-session attach used by the
   // remote create_session command. Delegates to the two-set state so the

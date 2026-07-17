@@ -313,7 +313,12 @@ describe("RemoteWS", () => {
 
       expect(received).toEqual([])
       expect(conn.connected).toBe(true)
-      expect(second?.sent).toEqual([JSON.stringify({ type: "event", sessionId: "active", event: "test", data: {} })])
+      // kilocode_change - K1 W1: `second` also receives the immediate
+      // heartbeat fired on open, before the explicit event send.
+      expect(second?.sent).toEqual([
+        JSON.stringify({ type: "heartbeat", protocolVersion: "local", sessions: [] }),
+        JSON.stringify({ type: "event", sessionId: "active", event: "test", data: {} }),
+      ])
 
       conn.close()
       conn = undefined
@@ -516,5 +521,66 @@ describe("RemoteWS", () => {
     await ws2
     await settled()
     expect(conn.connected).toBe(true)
+  })
+
+  // kilocode_change - K1 W1: immediate heartbeat on WS open
+
+  test("fires a heartbeat immediately on WS open before the timer tick", async () => {
+    server = createServer()
+    const firstMessage = server.waitForMessage()
+
+    conn = RemoteWS.connect({
+      url: server.url,
+      getToken: async () => "tok",
+      getSessions: async () => ({ type: "heartbeat", sessions: [{ id: "s1", status: "active", title: "T" }] }),
+      log: nolog(),
+      // Large interval so the only heartbeat that fires is the immediate one.
+      heartbeat: 60_000,
+    })
+
+    const raw = await firstMessage
+    // Should arrive well before the 60s interval elapses.
+    const parsed = JSON.parse(raw)
+    expect(parsed.type).toBe("heartbeat")
+    expect(parsed.sessions).toEqual([{ id: "s1", status: "active", title: "T" }])
+  })
+
+  test("propagates instance advertisement from getSessions to the heartbeat payload", async () => {
+    server = createServer()
+    const firstMessage = server.waitForMessage()
+
+    conn = RemoteWS.connect({
+      url: server.url,
+      getToken: async () => "tok",
+      getSessions: async () => ({
+        type: "heartbeat",
+        sessions: [],
+        instance: { name: "mbp-igor", projectName: "cloud", version: "1.2.3" },
+      }),
+      log: nolog(),
+      heartbeat: 60_000,
+    })
+
+    const raw = await firstMessage
+    const parsed = JSON.parse(raw)
+    expect(parsed.instance).toEqual({ name: "mbp-igor", projectName: "cloud", version: "1.2.3" })
+  })
+
+  test("omits instance field when not provided (legacy wire shape)", async () => {
+    server = createServer()
+    const firstMessage = server.waitForMessage()
+
+    conn = RemoteWS.connect({
+      url: server.url,
+      getToken: async () => "tok",
+      getSessions: async () => ({ type: "heartbeat", sessions: [] }),
+      log: nolog(),
+      heartbeat: 60_000,
+    })
+
+    const raw = await firstMessage
+    const parsed = JSON.parse(raw)
+    expect(parsed.instance).toBeUndefined()
+    expect(parsed.protocolVersion).toBeDefined()
   })
 })
