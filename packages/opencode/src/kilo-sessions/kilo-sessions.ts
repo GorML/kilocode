@@ -26,6 +26,7 @@ import simpleGit from "simple-git"
 import { RemoteWS } from "@/kilo-sessions/remote-ws"
 import { RemoteSender } from "@/kilo-sessions/remote-sender"
 import { RemoteProtocol } from "@/kilo-sessions/remote-protocol"
+import { SessionSpawner } from "@/kilo-sessions/session-spawner" // kilocode_change - K2 W2
 import { AttachedState } from "@/kilo-sessions/attached-state"
 import { SessionStatus } from "@/session/status"
 import { Telemetry } from "@kilocode/kilo-telemetry"
@@ -391,6 +392,26 @@ export namespace KiloSessions {
               () => void enableRemote().catch((err) => log.warn("remote not enabled", { error: String(err) })),
             )
           }
+          // kilocode_change start - K2 W2: dedicated attach-on-boot branch
+          // keyed on KILO_REMOTE_ATTACH_SESSION alone, independent of the
+          // auto-enable condition above. The detached child runs `kilo
+          // remote` WITHOUT KILO_REMOTE=1 set, so the auto-enable branch
+          // would never fire for it — this branch IS the enabling call
+          // for the detached child. For the tmux child the env IS set and
+          // this call coalesces with the auto-enable branch's own call
+          // (enableRemote is idempotent/coalescing). SessionStatus is a
+          // per-process in-memory map: without an explicit attach at boot
+          // the relay has no owner for the new session (a silent failure
+          // — the exact "no owner" problem this feature exists to avoid).
+          const attachId = process.env["KILO_REMOTE_ATTACH_SESSION"]
+          if (attachId) {
+            yield* Effect.sync(() => {
+              void enableRemote()
+                .then(() => attachRemoteSession(attachId))
+                .catch((err) => log.warn("attach-on-boot failed", { sessionId: attachId, error: String(err) }))
+            })
+          }
+          // kilocode_change end
           yield* Effect.addFinalizer(() =>
             Effect.sync(() => {
               statusSyncs.clear()
@@ -509,6 +530,12 @@ export namespace KiloSessions {
         conn,
         directory: Instance.directory,
         log,
+        // kilocode_change - K2 W2: process-per-session spawn seam. create_session
+        // no longer attaches the new session in-process; it spawns a fresh CLI
+        // child (tmux window when the parent is in tmux, detached child
+        // otherwise) to serve it. The child is responsible for the on-boot
+        // attach (see the KILO_REMOTE_ATTACH_SESSION init branch above).
+        spawnSession: SessionSpawner.create({ log }),
       })
 
       if (seq !== remoteSeq) {

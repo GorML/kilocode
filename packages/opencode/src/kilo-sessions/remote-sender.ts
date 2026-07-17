@@ -126,17 +126,22 @@ export namespace RemoteSender {
       // Production falls back to Session.Service.create with `{}`.
       readonly create?: (input?: Record<string, never>) => Promise<Session.Info>
       // kilocode_change - injectable remove hook used to roll back an orphan
-      // root session when attachSession fails after creation. The default
+      // root session when the spawn fails after creation. The default
       // delegates to Session.Service.remove and only swallows its own errors
-      // so the original attach failure is what reaches the caller.
+      // so the original spawn failure is what reaches the caller.
       readonly remove?: (sessionID: SessionID) => Promise<void>
       // kilocode_change end
     }
-    // kilocode_change start - duplicate-safe attach hook used by create_session.
-    // Production wires this to KiloSessions.attachRemoteSession so the attached
-    // set is mutated exactly once and the relay heartbeat fires only when the
-    // set actually changes.
-    attachSession?: (sessionID: SessionID) => Promise<void>
+    // kilocode_change start - K2 W2: process-per-session spawn seam used by
+    // create_session. The handler now spawns a fresh CLI process to serve the
+    // new session instead of attaching it in-process. The seam is typed as
+    // `SessionSpawner.SpawnSession` (see session-spawner.ts) — production
+    // wires it to `SessionSpawner.create()` from inside `enableRemote`, test
+    // fixtures inject a stub. The handler does NOT call `attachSession` for
+    // the new session; the spawned child is responsible for the on-boot
+    // attach (see kilo-sessions.ts init branch keyed on
+    // KILO_REMOTE_ATTACH_SESSION).
+    spawnSession?: import("@/kilo-sessions/session-spawner").SessionSpawner.SpawnSession
     // kilocode_change end
     catalog?: {
       readonly get: (sessionID: SessionID) => Promise<Session.Info>
@@ -230,10 +235,10 @@ export namespace RemoteSender {
       },
     }
     // kilocode_change start - orphan rollback for create_session: when
-    // sessionCreate succeeds but attachSession fails, the newly-created root
-    // session would otherwise stay in the DB with no relay awareness. The
+    // sessionCreate succeeds but the spawn fails, the newly-created root
+    // session would otherwise stay in the DB with no child to serve it. The
     // default remove() delegates to Session.Service.remove and swallows its
-    // own errors so the caller still observes the original attach failure.
+    // own errors so the caller still observes the original spawn failure.
     const sessionRemove =
       session.remove ??
       (async (id: SessionID) => {
@@ -241,7 +246,11 @@ export namespace RemoteSender {
         await AppRuntime.runPromise(Session.Service.use((svc) => svc.remove(id)))
       })
     // kilocode_change end
-    // kilocode_change start - session create + duplicate-safe attach used by create_session
+    // kilocode_change start - session create + spawn-per-session seam used by
+    // create_session. Production wires `spawnSession` from inside
+    // `enableRemote` (see kilo-sessions.ts). When unset, the handler treats
+    // every spawn as a failure (this should never happen in production —
+    // a missing seam is a wiring bug, not a runtime fallback).
     const sessionCreate =
       session.create ??
       (async (input?: Record<string, never>) => {
@@ -250,12 +259,7 @@ export namespace RemoteSender {
           Session.Service.use((svc) => svc.create(input as Parameters<typeof svc.create>[0])),
         )
       })
-    const attachSession =
-      options.attachSession ??
-      (async (id: SessionID) => {
-        const { KiloSessions } = await import("@/kilo-sessions/kilo-sessions")
-        await KiloSessions.attachRemoteSession(id)
-      })
+    const spawnSession = options.spawnSession
     // kilocode_change end
     // kilocode_change start - injectable slash command discovery + execution
     const commands = options.commands ?? RemoteCommand.live()
@@ -559,10 +563,24 @@ export namespace RemoteSender {
         return
       }
       if (msg.command === "create_session") {
-        // kilocode_change start - remote /new creation: root session, attached + heartbeat before response
+        // kilocode_change start - K2 W2: process-per-session creation.
+        // The wire shape is unchanged (`{protocolVersion: 1}`), but the
+        // handler now (a) accepts an absent `sessionId` (the new
+        // instance-picker path is connectionId-targeted), (b) resolves
+        // the target directory to that existing session's directory when
+        // a `sessionId` is present (legacy mobile /new-inside-a-session
+        // path) or to `options.directory` (the spawn-capable instance's
+        // own launch directory) otherwise, and (c) instead of attaching
+        // the new session in-process, it pre-creates the session row
+        // inside `provide({directory})` so the id is known synchronously
+        // for the response, then spawns a fresh CLI process to serve
+        // that session — the child is responsible for the on-boot attach
+        // (see kilo-sessions.ts init branch keyed on
+        // KILO_REMOTE_ATTACH_SESSION). Spawn failures roll back the
+        // pre-created session via the same `sessionRemove` seam the
+        // previous handler used for the attach-failure case.
         const parsed = CreateSessionRequest.safeParse(msg.data)
-        const current = msg.sessionId ? decodeSessionID(msg.sessionId) : Option.none<SessionID>()
-        if (!parsed.success || Option.isNone(current)) {
+        if (!parsed.success) {
           options.conn.send({
             type: "response",
             id: msg.id,
@@ -570,41 +588,62 @@ export namespace RemoteSender {
           })
           return
         }
+        const current = msg.sessionId ? decodeSessionID(msg.sessionId) : Option.none<SessionID>()
+        if (msg.sessionId && Option.isNone(current)) {
+          options.conn.send({
+            type: "response",
+            id: msg.id,
+            error: "invalid create_session command",
+          })
+          return
+        }
+        if (!spawnSession) {
+          options.log.error("create session failed: spawnSession seam not wired", { id: msg.id })
+          options.conn.send({ type: "response", id: msg.id, error: "failed to create session" })
+          return
+        }
         const run = options.provide ?? provide
         void (async () => {
           try {
-            const result = await run({
-              directory: (await session.get(current.value)).directory,
-              fn: async () => {
-                const created = await sessionCreate({})
-                // attachSession is the duplicate-safe seam: it mutates the
-                // attached set exactly once and fires conn.heartbeat() only
-                // when the set actually changes, so the relay learns about
-                // the new session before we respond.
-                try {
-                  await attachSession(created.id)
-                } catch (attachError) {
-                  // Roll back the newly-created root session so the DB does
-                  // not keep an orphan the relay never learned about. Swallow
-                  // the cleanup error here — the original attach failure is
-                  // what the caller must see, so we re-throw it below.
-                  try {
-                    await sessionRemove(created.id)
-                  } catch (cleanupError) {
-                    options.log.error("create session cleanup failed", {
-                      id: msg.id,
-                      error: errorName(cleanupError),
-                    })
-                  }
-                  throw attachError
-                }
-                return created
-              },
+            // Resolve the target directory: a present `sessionId` keeps the
+            // legacy mobile /new-inside-a-session behavior (target = that
+            // session's directory); an absent `sessionId` targets the
+            // instance's own launch directory (the new instance-picker path).
+            const targetDirectory = await current.pipe(
+              Option.map((sid) => session.get(sid)),
+              Option.map((p) => p.then((info) => info.directory)),
+              Option.getOrElse(() => Promise.resolve(options.directory)),
+            )
+            const created = await run({
+              directory: targetDirectory,
+              fn: async () => sessionCreate({}),
             })
+            // Spawn the child OUTSIDE the `provide` block — the child runs
+            // in its own instance context keyed to the same targetDirectory
+            // (and inherits the shared SQLite session DB), so the new
+            // session row this parent just created is visible to the child
+            // the moment it boots.
+            try {
+              await spawnSession({ sessionId: created.id, directory: targetDirectory })
+            } catch (spawnError) {
+              // Spawn failed: roll back the pre-created session so the DB
+              // does not keep an orphan no child will ever serve. Swallow
+              // the cleanup error so the caller still observes the
+              // original spawn failure.
+              try {
+                await sessionRemove(created.id)
+              } catch (cleanupError) {
+                options.log.error("create session cleanup failed", {
+                  id: msg.id,
+                  error: errorName(cleanupError),
+                })
+              }
+              throw spawnError
+            }
             options.conn.send({
               type: "response",
               id: msg.id,
-              result: { protocolVersion: 1, sessionID: result.id },
+              result: { protocolVersion: 1, sessionID: created.id },
             })
           } catch (error) {
             options.log.error("create session failed", { id: msg.id, error: errorName(error) })

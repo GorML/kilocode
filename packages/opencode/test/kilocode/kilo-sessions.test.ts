@@ -461,4 +461,202 @@ describe("KiloSessions.setInstanceAdvertisement (K1 W1)", () => {
     })
   })
 })
+
+// kilocode_change start - K2 W2: KILO_REMOTE_ATTACH_SESSION attach-on-boot.
+//
+// The dedicated init branch keyed on KILO_REMOTE_ATTACH_SESSION alone (see
+// kilo-sessions.ts around the auto-enable condition) is the single most
+// load-bearing correctness property of the spawn-per-session feature:
+// SessionStatus is a per-process in-memory map, so without an explicit
+// attach at boot the relay has no owner for the new session. The branch
+// must fire correctly in BOTH child modes (tmux child sets KILO_REMOTE=1,
+// detached child does NOT).
+describe("KiloSessions attach-on-boot (K2 W2)", () => {
+  let heartbeatCalls = 0
+
+  beforeEach(() => {
+    heartbeatCalls = 0
+    process.env["KILO_DISABLE_SESSION_INGEST"] = "0"
+    delete process.env["KILO_SESSION_INGEST_URL"]
+    delete process.env["KILO_REMOTE_ATTACH_SESSION"]
+    delete process.env["KILO_REMOTE"]
+    process.env["KILO_API_KEY"] = "tok"
+    reset("tok")
+    KiloSessions.resetInstanceAdvertisementForTests()
+
+    spyOn(RemoteSender, "create").mockImplementation(
+      () =>
+        ({
+          handle() {},
+          dispose() {},
+        }) as RemoteSender.Sender,
+    )
+    spyOn(RemoteWS, "connect").mockImplementation(
+      (options) =>
+        ({
+          connectionId: "test-conn",
+          send() {},
+          heartbeat: () => {
+            heartbeatCalls += 1
+            return options.getSessions().then(() => undefined)
+          },
+          close() {},
+          get connected() {
+            return true
+          },
+        }) as RemoteWS.Connection,
+    )
+
+    clearInFlightCache("kilo-sessions:token")
+    clearInFlightCache("kilo-sessions:token-valid:tok")
+
+    globalThis.fetch = mock(async (input) => {
+      if (String(input).endsWith("/api/user")) {
+        return new Response(null, { status: 200 })
+      }
+      return new Response(null, { status: 200 })
+    }) as unknown as typeof fetch
+  })
+
+  afterEach(async () => {
+    const pub = spyOn(Bus, "publish").mockResolvedValue(undefined as never)
+    await using tmp = await tmpdir({ git: true })
+    await provide({
+      directory: tmp.path,
+      fn: async () => {
+        KiloSessions.disableRemote()
+      },
+    })
+    pub.mockRestore()
+    mock.restore()
+    delete process.env["KILO_DISABLE_SESSION_INGEST"]
+    delete process.env["KILO_SESSION_INGEST_URL"]
+    delete process.env["KILO_REMOTE_ATTACH_SESSION"]
+    delete process.env["KILO_REMOTE"]
+    delete process.env["KILO_API_KEY"]
+    reset("tok")
+  })
+
+  function connectCalls(): number {
+    return (RemoteWS.connect as unknown as { mock: { calls: unknown[] } }).mock.calls.length
+  }
+
+  // Reads the `getSessions` closure that kilo-sessions.ts passed to
+  // RemoteWS.connect when enableRemote() ran. The mock stores the Options
+  // on the spy's `.mock.calls` array.
+  function capturedGetSessions(): () => Promise<RemoteProtocol.Heartbeat> {
+    const calls = (RemoteWS.connect as unknown as { mock: { calls: { 0: RemoteWS.Options }[] } }).mock.calls
+    const getSessions = calls[0]?.[0].getSessions
+    if (!getSessions) throw new Error("RemoteWS.connect was not called")
+    return getSessions as () => Promise<RemoteProtocol.Heartbeat>
+  }
+
+  async function waitForHeartbeat(min: number, attempts = 40) {
+    for (let i = 0; i < attempts && heartbeatCalls < min; i++) {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+
+  // Drive the KiloSessions.Service.init() Effect — that's the code path
+  // that contains the dedicated attach-on-boot branch (the branch lives
+  // inside the lazily-built InstanceState state, not in the top-level
+  // enableRemote() entry point).
+  //
+  // Critically, the Layer this builds registers a finalizer that calls
+  // `disableRemote()` (which resets `attachedState` and clears `remote`) on
+  // SCOPE CLOSE. In production the CLI process keeps this scope open for
+  // its whole lifetime, so the finalizer only runs at real shutdown. A bare
+  // `Effect.runPromise(driveInit())` in a test closes the scope as soon as
+  // `init()`'s own (synchronous, fire-and-forget-scheduling) body returns —
+  // long before the fire-and-forget `enableRemote().then(() =>
+  // attachRemoteSession(id))` chain it kicked off has actually finished.
+  // That finalizer race would silently wipe the attach before the test ever
+  // observes it. `driveInitAndObserve` keeps the scope open by running the
+  // wait-for-heartbeat polling and the `getSessions()` read *inside* the
+  // same Effect (bridged via `Effect.promise`), so the finalizer cannot
+  // fire until after the assertions have already captured the payload.
+  function driveInitAndObserve(minHeartbeats: number) {
+    return Effect.gen(function* () {
+      const sessions = yield* KiloSessions.Service
+      yield* sessions.init()
+      yield* Effect.promise(() => waitForHeartbeat(minHeartbeats))
+      return yield* Effect.promise(() => capturedGetSessions()())
+    }).pipe(Effect.provide(layer()))
+  }
+
+  test("tmux child: env var set + KILO_REMOTE=1 — both branches coalesce, single attach with right id", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provide({
+      directory: tmp.path,
+      fn: async () => {
+        // The heartbeat's getSessions() looks up each attached id via
+        // Session.Service.get and drops ids that don't resolve to a real
+        // session (Effect.orElseSucceed(() => undefined) + a filter) — so
+        // the attach-on-boot branch's effect is only observable in the
+        // heartbeat payload for a session that actually exists.
+        const { AppRuntime } = await import("../../src/effect/app-runtime")
+        const created = await AppRuntime.runPromise(Session.Service.use((svc) => svc.create({})))
+        process.env["KILO_REMOTE_ATTACH_SESSION"] = created.id
+        process.env["KILO_REMOTE"] = "1"
+
+        // The dedicated branch fires `enableRemote().then(() => attachRemoteSession(id))`.
+        // `attachRemoteSession` mutates `attachedState.union()`; the next
+        // getSessions() reports that union as part of the heartbeat payload.
+        // Wait for at least 2 heartbeats (initial + attach-driven) to land,
+        // then read the payload — all inside the same Effect scope (see
+        // `driveInitAndObserve`'s comment) so the teardown finalizer cannot
+        // reset the attached state before we observe it.
+        const payload = await Effect.runPromise(driveInitAndObserve(2))
+        // Both the auto-enable branch (KILO_REMOTE=1) and the dedicated
+        // attach-on-boot branch (KILO_REMOTE_ATTACH_SESSION) call
+        // enableRemote; the function is idempotent/coalescing so only ONE
+        // RemoteWS.connect was made.
+        expect(connectCalls()).toBe(1)
+        // The session id MUST be in the attached union — this is the
+        // observable consequence of the dedicated branch's
+        // `attachRemoteSession(id)` call.
+        const ids = payload.sessions.map((s) => s.id)
+        expect(ids).toContain(created.id)
+      },
+    })
+  })
+
+  test("detached child: env var set WITHOUT KILO_REMOTE=1 — the dedicated branch is the only enabler", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { AppRuntime } = await import("../../src/effect/app-runtime")
+        const created = await AppRuntime.runPromise(Session.Service.use((svc) => svc.create({})))
+        process.env["KILO_REMOTE_ATTACH_SESSION"] = created.id
+        // KILO_REMOTE is NOT set — the auto-enable branch is inactive.
+
+        const payload = await Effect.runPromise(driveInitAndObserve(2))
+        // enableRemote called once via the dedicated branch.
+        expect(connectCalls()).toBe(1)
+        // Same observable check as the tmux-child case.
+        const ids = payload.sessions.map((s) => s.id)
+        expect(ids).toContain(created.id)
+      },
+    })
+  })
+
+  test("env var unset: no attach attempted (regression — behavior unchanged for ordinary `kilo remote` processes)", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provide({
+      directory: tmp.path,
+      fn: async () => {
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const sessions = yield* KiloSessions.Service
+            yield* sessions.init()
+            yield* Effect.promise(() => new Promise((r) => setTimeout(r, 200)))
+          }).pipe(Effect.provide(layer())),
+        )
+        // No connection either, since KILO_REMOTE=1 / remote_control are not set.
+        expect(connectCalls()).toBe(0)
+      },
+    })
+  })
+})
 // kilocode_change end
