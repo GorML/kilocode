@@ -158,7 +158,9 @@ describe("cloud session import preparation", () => {
   test("remaps references and target context without mutating the export", () => {
     const data = sample()
     const before = structuredClone(data)
+    const start = Date.now()
     const result = prepareSessionImport(data, deps())
+    const end = Date.now()
 
     expect(result.info).toMatchObject({
       id: "ses_local",
@@ -175,7 +177,8 @@ describe("cloud session import preparation", () => {
     expect(result.info).not.toHaveProperty("parentID")
     expect(result.info).not.toHaveProperty("share")
     expect(result.info).not.toHaveProperty("revert")
-    expect(result.info.time.updated).toBeGreaterThanOrEqual(before.info.time.updated)
+    expect(result.info.time.updated).toBeGreaterThanOrEqual(start)
+    expect(result.info.time.updated).toBeLessThanOrEqual(end)
     expect(result.messages[0]).toMatchObject({
       id: "msg_local_child",
       session_id: "ses_local",
