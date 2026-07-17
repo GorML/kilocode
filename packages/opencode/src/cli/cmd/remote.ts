@@ -13,27 +13,44 @@ function truncate(value: string, max: number) {
   return value.length > max ? value.slice(0, max) : value
 }
 
+// kilocode_change start - K1 W1: extracted so the gate and the payload
+// shape are unit-testable as real behavior, rather than only through a
+// source-text/regex assertion on this file (the handler itself can't be
+// driven end-to-end — see the doc comment on `handler` below).
+/**
+ * `KILO_REMOTE_ATTACH_SESSION` is reserved for K2's spawned children —
+ * children must never advertise themselves, so this gate exists even
+ * before K2 lands. K2's spawn path sets this var and calls `kilo remote`;
+ * this gate then keeps the child off the picker.
+ */
+export function shouldAdvertiseInstance(env: Record<string, string | undefined>): boolean {
+  return !env["KILO_REMOTE_ATTACH_SESSION"]
+}
+
+export function buildInstanceAdvertisement(directory: string): {
+  name: string
+  projectName: string
+  version: string
+} {
+  return {
+    name: truncate(os.hostname(), 64),
+    projectName: truncate(path.basename(directory) || directory, 64),
+    version: truncate(InstallationVersion, 32),
+  }
+}
+// kilocode_change end
+
 export const RemoteCommand = cmd({
   command: "remote",
   describe: "enable remote connection for real-time session relay",
   builder: (yargs) => yargs,
   handler: async () => {
     await bootstrap(process.cwd(), async () => {
-      // kilocode_change start - K1 W1: advertise this instance on the relay
+      // kilocode_change - K1 W1: advertise this instance on the relay
       // heartbeat so the cloud side can show it as a spawn-capable instance.
-      // The KILO_REMOTE_ATTACH_SESSION env var is reserved for K2's spawned
-      // children — children must never advertise themselves, so we gate on it
-      // here even before K2 lands. K2's spawn path will set this var and
-      // call `kilo remote`; this gate then keeps the child off the picker.
-      if (!process.env["KILO_REMOTE_ATTACH_SESSION"]) {
-        const directory = Instance.directory
-        KiloSessions.setInstanceAdvertisement({
-          name: truncate(os.hostname(), 64),
-          projectName: truncate(path.basename(directory) || directory, 64),
-          version: truncate(InstallationVersion, 32),
-        })
+      if (shouldAdvertiseInstance(process.env)) {
+        KiloSessions.setInstanceAdvertisement(buildInstanceAdvertisement(Instance.directory))
       }
-      // kilocode_change end
 
       await KiloSessions.enableRemote()
       console.log("Remote connection enabled.")

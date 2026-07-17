@@ -43,10 +43,11 @@ const testAllow: Record<string, { count: number; reason: string }> = {
     reason: "disk-backed instance integration test cleanup",
   },
   "kilocode/kilo-sessions.test.ts": {
-    count: 4,
+    count: 6,
     reason:
-      "K2 attach-on-boot regression tests create a real session so the heartbeat's Session.Service.get lookup " +
-      "resolves it — same disk-backed instance integration pattern as session-compaction-chunks.test.ts",
+      "K2 attach-on-boot regression tests (including the transient-heartbeat-retry test) create a real " +
+      "session so the heartbeat's Session.Service.get lookup resolves it — same disk-backed instance " +
+      "integration pattern as session-compaction-chunks.test.ts",
   },
   "kilocode/session/platform-attribution.test.ts": { count: 2, reason: "existing runtime integration test" },
   "kilocode/session-prompt-queue.test.ts": { count: 6, reason: "prompt queue legacy instance bridge regression" },

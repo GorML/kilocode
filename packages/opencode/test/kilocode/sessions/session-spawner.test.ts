@@ -336,7 +336,12 @@ describe("SessionSpawner.spawn", () => {
         platform: "linux",
         execFileSync: silentExecOk(),
         spawn: fake.spawn,
-        log: { info: () => {}, error: () => {}, warn: (message, meta) => warnCalls.push({ message, meta }) },
+        log: {
+          info: () => {},
+          error: () => {},
+          warn: (message?: unknown, meta?: Record<string, unknown>) =>
+            warnCalls.push({ message: String(message), meta }),
+        },
         logDir: "/tmp/spawner-logs",
       },
     })

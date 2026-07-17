@@ -1,47 +1,49 @@
 // kilocode_change - new file
-// K1 W1: verify the `kilo remote` command's call site for
-// `KiloSessions.setInstanceAdvertisement` is gated on the
-// `KILO_REMOTE_ATTACH_SESSION` env var.
+// K1 W1: verify `shouldAdvertiseInstance`'s gate and
+// `buildInstanceAdvertisement`'s payload shape as real behavior.
 //
-// K2 (Wave 2) uses that env var to attach spawned children, and those
-// children must never advertise themselves on the relay. This test
-// locks in the env-gate structure so K2 can rely on it before K2 lands.
+// K2 (Wave 2) uses `KILO_REMOTE_ATTACH_SESSION` to attach spawned
+// children, and those children must never advertise themselves on the
+// relay. This test locks in that gate's actual behavior so K2 can rely on
+// it before K2 lands.
 //
-// The handler is a CLI entry point that calls `bootstrap(process.cwd(),
-// async () => { ... })` and then awaits an abort signal — the abort
-// never resolves, so we cannot drive the handler end-to-end. Instead we
-// read the source and verify the gate structure, which is the
-// contractually important thing: the setter must be inside an
-// `if (!process.env["KILO_REMOTE_ATTACH_SESSION"])` block.
+// The `RemoteCommand` handler itself is a CLI entry point that calls
+// `bootstrap(process.cwd(), async () => { ... })` and then awaits an abort
+// signal that never resolves in a test — it cannot be driven end-to-end.
+// `shouldAdvertiseInstance` and `buildInstanceAdvertisement` are extracted
+// from the handler specifically so the gate and the advertised payload are
+// each independently testable as real behavior, not via a source-text/regex
+// assertion on the handler's structure.
 
 import { describe, expect, test } from "bun:test"
-import { fileURLToPath } from "node:url"
+import { buildInstanceAdvertisement, shouldAdvertiseInstance } from "../../../../src/cli/cmd/remote"
 
 describe("RemoteCommand env-gate (K1 W1)", () => {
-  test("KiloSessions.setInstanceAdvertisement call site is gated on KILO_REMOTE_ATTACH_SESSION", async () => {
-    // kilocode_change - `URL.pathname` for a `file://` URL on Windows keeps
-    // a leading slash before the drive letter (e.g. `/C:/Users/...`), which
-    // `Bun.file()` cannot resolve to the real path. `fileURLToPath` handles
-    // the platform-specific conversion correctly on every OS.
-    const filePath = fileURLToPath(new URL("../../../../src/cli/cmd/remote.ts", import.meta.url))
-    const src = await Bun.file(filePath).text()
+  test("advertises when KILO_REMOTE_ATTACH_SESSION is unset — the explicit `kilo remote` command path", () => {
+    expect(shouldAdvertiseInstance({})).toBe(true)
+    expect(shouldAdvertiseInstance({ KILO_REMOTE_ATTACH_SESSION: undefined })).toBe(true)
+  })
 
-    // The env var must be referenced.
-    expect(src).toContain("KILO_REMOTE_ATTACH_SESSION")
+  test("never advertises when KILO_REMOTE_ATTACH_SESSION is set — a K2-spawned child must stay off the picker", () => {
+    expect(shouldAdvertiseInstance({ KILO_REMOTE_ATTACH_SESSION: "ses_abc123" })).toBe(false)
+  })
 
-    // The gate must negate the env var.
-    expect(src).toMatch(/!process\.env\["KILO_REMOTE_ATTACH_SESSION"\]/)
+  test("buildInstanceAdvertisement resolves name/projectName/version from the directory and installation version", () => {
+    const advertisement = buildInstanceAdvertisement("/Users/igor/projects/my-app")
+    expect(advertisement.projectName).toBe("my-app")
+    expect(typeof advertisement.name).toBe("string")
+    expect(advertisement.name.length).toBeGreaterThan(0)
+    expect(typeof advertisement.version).toBe("string")
+  })
 
-    // The setter call must be inside the if block — strictly more
-    // indented than the if line.
-    const lines = src.split("\n")
-    const ifLine = lines.findIndex((l) => l.includes("if") && l.includes("KILO_REMOTE_ATTACH_SESSION"))
-    expect(ifLine).toBeGreaterThanOrEqual(0)
-    const setterLine = lines.findIndex((l) => l.includes("setInstanceAdvertisement"))
-    expect(setterLine).toBeGreaterThan(ifLine)
+  test("buildInstanceAdvertisement truncates an overlong project directory name to 64 chars", () => {
+    const longName = "a".repeat(100)
+    const advertisement = buildInstanceAdvertisement(`/Users/igor/projects/${longName}`)
+    expect(advertisement.projectName.length).toBeLessThanOrEqual(64)
+  })
 
-    const ifIndent = lines[ifLine].search(/\S/)
-    const setterIndent = lines[setterLine].search(/\S/)
-    expect(setterIndent).toBeGreaterThan(ifIndent)
+  test("buildInstanceAdvertisement falls back to the full directory when basename is empty (root path)", () => {
+    const advertisement = buildInstanceAdvertisement("/")
+    expect(advertisement.projectName).toBe("/")
   })
 })

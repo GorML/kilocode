@@ -657,6 +657,51 @@ describe("KiloSessions attach-on-boot (K2 W2)", () => {
     })
   })
 
+  test("attach-on-boot retries after a transient heartbeat failure and still attaches", async () => {
+    // Override this test's own heartbeat mock so the FIRST call (the
+    // announce-triggered one) rejects, simulating a transient network
+    // hiccup on the very first heartbeat right after connecting; the
+    // second call (the retry) succeeds.
+    let heartbeatAttempt = 0
+    spyOn(RemoteWS, "connect").mockImplementation(
+      (options) =>
+        ({
+          connectionId: "test-conn",
+          send() {},
+          heartbeat: () => {
+            heartbeatCalls += 1
+            heartbeatAttempt += 1
+            if (heartbeatAttempt === 1) return Promise.reject(new Error("transient heartbeat failure"))
+            return options.getSessions().then(() => undefined)
+          },
+          close() {},
+          get connected() {
+            return true
+          },
+        }) as RemoteWS.Connection,
+    )
+
+    await using tmp = await tmpdir({ git: true })
+    await provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { AppRuntime } = await import("../../src/effect/app-runtime")
+        const created = await AppRuntime.runPromise(Session.Service.use((svc) => svc.create({})))
+        process.env["KILO_REMOTE_ATTACH_SESSION"] = created.id
+        process.env["KILO_REMOTE"] = "1"
+
+        const payload = await Effect.runPromise(driveInitAndObserve(2))
+        // The retry succeeded — the id is in the union despite the first
+        // heartbeat attempt having failed.
+        const ids = payload.sessions.map((s) => s.id)
+        expect(ids).toContain(created.id)
+        // Both the failed first attempt and the successful retry actually
+        // reached the mocked heartbeat.
+        expect(heartbeatAttempt).toBeGreaterThanOrEqual(2)
+      },
+    })
+  })
+
   test("env var unset: no attach attempted (regression — behavior unchanged for ordinary `kilo remote` processes)", async () => {
     await using tmp = await tmpdir({ git: true })
     await provide({

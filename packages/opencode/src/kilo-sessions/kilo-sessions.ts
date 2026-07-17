@@ -407,7 +407,7 @@ export namespace KiloSessions {
           if (attachId) {
             yield* Effect.sync(() => {
               void enableRemote()
-                .then(() => attachRemoteSession(attachId))
+                .then(() => attachRemoteSessionWithRetry(attachId))
                 .catch((err) => log.warn("attach-on-boot failed", { sessionId: attachId, error: String(err) }))
             })
           }
@@ -627,6 +627,33 @@ export namespace KiloSessions {
   // presence-owned id is never reachable here because the factory guards it).
   export async function attachRemoteSession(id: string) {
     await attachedState.announce(id)
+  }
+
+  // kilocode_change - K2 W2: the attach-on-boot call site is a one-time
+  // startup event; a bare single attempt would leave a spawned child
+  // permanently unowned on the relay (the exact "no owner" failure this
+  // feature exists to avoid) if the very first heartbeat right after
+  // connecting hits a transient hiccup. Bounded retry with a short delay
+  // smooths over that window without meaningfully delaying startup or
+  // retrying indefinitely.
+  const ATTACH_ON_BOOT_RETRY_ATTEMPTS = 3
+  const ATTACH_ON_BOOT_RETRY_DELAY_MS = 500
+
+  async function attachRemoteSessionWithRetry(id: string): Promise<void> {
+    for (let attempt = 1; attempt <= ATTACH_ON_BOOT_RETRY_ATTEMPTS; attempt++) {
+      try {
+        await attachRemoteSession(id)
+        return
+      } catch (err) {
+        if (attempt === ATTACH_ON_BOOT_RETRY_ATTEMPTS) throw err
+        log.warn("attach-on-boot attempt failed, retrying", {
+          sessionId: id,
+          attempt,
+          error: String(err),
+        })
+        await new Promise((resolve) => setTimeout(resolve, ATTACH_ON_BOOT_RETRY_DELAY_MS))
+      }
+    }
   }
   // kilocode_change end
 

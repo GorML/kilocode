@@ -84,7 +84,11 @@ export namespace SessionSpawner {
     platform: NodeJS.Platform
     execFileSync: ExecFileSyncFn
     spawn: SpawnFn
-    log: { info: (...args: any[]) => void; error: (...args: any[]) => void; warn: (...args: any[]) => void }
+    log: {
+      info(message?: unknown, extra?: Record<string, unknown>): void
+      error(message?: unknown, extra?: Record<string, unknown>): void
+      warn(message?: unknown, extra?: Record<string, unknown>): void
+    }
     logDir: string
   }
 
@@ -235,7 +239,13 @@ export namespace SessionSpawner {
       })
       child.unref()
     } finally {
-      await handle.close().catch(() => undefined)
+      await handle.close().catch((err) => {
+        deps.log.warn("session-spawner: failed to close detached child's log file handle", {
+          sessionId,
+          logFile,
+          error: String(err),
+        })
+      })
     }
     deps.log.info("session-spawner: detached child spawned", { sessionId, logFile })
     return { mode: "detached", command: built.command, args: built.args, env: built.env, logFile }
